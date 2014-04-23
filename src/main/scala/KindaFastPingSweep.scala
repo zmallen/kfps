@@ -3,7 +3,7 @@ package scala
 /**
  * KindaFastPingSweep for CTF365
  * So we arent bogged down scanning 2 to the 16 addresses using fping or nmap
- * This shit is kinda fast
+ *
  * @todo
  *       Command line parsing for timeout, workers, ip ranges
  *       Writeout to file, csv or \n separated for nmap OS/service fingerprinting
@@ -14,34 +14,32 @@ package scala
  * kfps -> 1.928 s, 500ms timeout, 10 workers
  */
 
-import scala.collection.{mutable, immutable}
 import akka.actor.{ActorSystem, Props, Actor}
 import akka.routing.RoundRobinRouter
-import java.util.concurrent.LinkedBlockingQueue
 import java.net.InetAddress
+import org.apache.commons.net.util.SubnetUtils
+import scala.collection.mutable.ArrayBuffer
 
 object KindaFastPingSweep  {
   def main(args:Array[String]) {
     val system = ActorSystem("PingSweeperSystem")
-    val nrOfWorkers = 10
+    val nrOfWorkers = 15
     val timeout = 500
-    // start distribution of work
-    val master = system.actorOf(Props(new Master(10)),name = "master")
+    // create a Router to distribute ping tasks
     val pingerRouter = system.actorOf(
       Props(new Pinger(timeout)).withRouter(RoundRobinRouter(nrOfWorkers)), name = "pingerRouter")
 
-    // parse command line here
-    val ip = "10.0.0."
-    for(oct <- 1 to 10) {
-//      addressesQueue.queue.put(s"$ip"+oct)
-      pingerRouter ! Ping(s"$ip"+oct)
+    val ipRange = "192.168.1.0/24"
+    val utils = new SubnetUtils(ipRange)
+    val netAddress = utils.getInfo.getNetworkAddress
+    val broadcastAddress = utils.getInfo.getBroadcastAddress
+    val addressesToPing = utils.getInfo.getAllAddresses.filter(x => !(x.equals(netAddress) || x.equals(broadcastAddress)))
+    // create a Router to handle and tally Ping task returns
+    val master = system.actorOf(Props(new Master(addressesToPing.length)),name = "master")
+    for(ip <- addressesToPing) {
+      pingerRouter ! Ping(ip)
     }
-
   }
-}
-// is a queue necessary?
-object addressesQueue {
-  val queue = new LinkedBlockingQueue[String]()
 }
 sealed trait Communicator
 case class Ping(ip: String) extends Communicator
@@ -58,11 +56,11 @@ class Pinger(timeout: Int) extends Actor {
         // is it reachable given timeout? fping uses 500 default
         InetAddress.getByName(ip).isReachable(timeout) match {
           case true => context.system.actorSelection("/user/master") ! Result(Some(ip))
-          case false => context.system.actorSelection("/user/master") ! Result(Some(null))
+          case false => context.system.actorSelection("/user/master") ! Result(None)
         }
       }
       catch {
-        case e: Exception => context.system.actorSelection("/user/master") ! Result(Some(null))
+        case e: Exception => context.system.actorSelection("/user/master") ! Result(None)
       }
     }
   }
@@ -74,18 +72,26 @@ class Pinger(timeout: Int) extends Actor {
  */
 class Master(totalIps: Int) extends Actor {
   var counter = 0
+  val upList = ArrayBuffer[String]()
+  var downIps = 0
   def receive = {
     case Result(ip) => {
       counter += 1
       ip match {
         case Some(address) => {
           // write out to file here or stdout for processing
-        println("Address response =>  " + address)}
-        case None => { println("None") }
+          upList += address
+        }
+        case None => {
+          downIps += 1
+        }
       }
       // finished here! write out/close
-      if(counter == totalIps)
+      if(counter == totalIps) {
+        println("IP responses from -> " + upList)
+        println("IPs that did not respond -> " + downIps)
         context.system.shutdown
+      }
     }
   }
 }
